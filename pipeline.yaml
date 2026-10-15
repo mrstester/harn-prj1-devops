@@ -1,0 +1,77 @@
+
+kind: pipeline
+spec:
+  stages:
+    - name: build-and-deploy
+      type: ci
+      spec:
+        platform:
+          os: linux
+          arch: amd64
+
+        steps:
+          # 1. Clone application repository
+          - name: clone-application
+            type: run
+            spec:
+              container: alpine/git
+              script: |-
+                set -eu
+                rm -rf app
+                git clone --branch dev \
+                  https://github.com/YOUR_ORG/sample-flask-app.git app
+                test -f app/app.py
+                test -f app/requirements.txt
+
+          # 2. Prepare Docker build context
+          - name: prepare-build-context
+            type: run
+            spec:
+              container: alpine:3.21
+              script: |-
+                set -eu
+                test -f Dockerfile
+                test -f deployment.yaml
+                cp Dockerfile app/Dockerfile
+                cp .env.example app/.env.example
+                echo "Build context prepared"
+                ls -la app
+
+          # 3. Build and push Docker image
+          - name: docker-build-push
+            type: plugin
+            spec:
+              name: docker
+              inputs:
+                insecure: true
+                repo: 192.168.0.0:5000/sample-flask
+                registry: 192.168.0.0:5000
+                tags: dev-${{ build.number }}
+                dockerfile: app/Dockerfile
+                context: app
+                username: ${{ secrets.get("registry_username") }}
+                password: ${{ secrets.get("registry_password") }}
+
+          # 4. Deploy to Kubernetes
+          - name: kubernetes-deploy
+            type: run
+            spec:
+              container: bitnami/kubectl:1.31
+              script: |-
+                set -eu
+                mkdir -p "$HOME/.kube"
+                echo "$KUBECONFIG_B64" | base64 -d \
+                  > "$HOME/.kube/config"
+                chmod 600 "$HOME/.kube/config"
+
+                IMAGE="192.168.0.0:5000/sample-flask:dev-${BUILD_NUMBER}"
+
+                sed "s#RRR/rrr:ttt#$IMAGE#g" \
+                  deployment.yaml > rendered-deployment.yaml
+
+                kubectl apply -f rendered-deployment.yaml
+                kubectl rollout status deployment/sample-flask \
+                  --timeout=120s
+              environment:
+                KUBECONFIG_B64: ${{ secrets.get("kubeconfig_b64") }}
+                BUILD_NUMBER: ${{ build.number }}
